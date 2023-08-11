@@ -5,15 +5,14 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-import os
 import copy
 
 HOST = "127.0.0.1"
 PORT = 1234
 curve = ec.SECP256R1()
 shared_key  = None
-iv = os.urandom(16)
-salt = os.urandom(16)
+iv = b'\xf0<\x92)A7\xaf\\\xa6k\xd6\xfc\x99\x88\x03>'
+salt = b'<h\x1az\x94\x89\xec\x907\xe8\xc1\x8e\x03u\xe3\xa1'
 
 def send_thread(sockfd: socket.socket, public_key: ec.EllipticCurvePrivateKey):
     global shared_key
@@ -32,7 +31,6 @@ def send_thread(sockfd: socket.socket, public_key: ec.EllipticCurvePrivateKey):
         encryptor = Cipher(algorithms.AES(aes_key), modes.CFB(iv), backend=default_backend()).encryptor()
         ciphertext = encryptor.update(message) + encryptor.finalize()
         sockfd.sendall(ciphertext)
-        print(ciphertext)
 
 def recv_thread(sockfd: socket.socket, private_key: ec.EllipticCurvePrivateKey):
     global shared_key
@@ -59,11 +57,10 @@ def recv_thread(sockfd: socket.socket, private_key: ec.EllipticCurvePrivateKey):
             print("Server Disconnected")
             break
         
-        print(recv_message)
         decryptor = Cipher(algorithms.AES(aes_key), modes.CFB(iv), backend=default_backend()).decryptor()
         decrypted_text = decryptor.update(recv_message) + decryptor.finalize()
 
-        print(decrypted_text)
+        print(decrypted_text.decode())
 
 def main():
     private_key = ec.generate_private_key(curve, default_backend())
