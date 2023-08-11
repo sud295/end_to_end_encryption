@@ -6,47 +6,50 @@ from cryptography.hazmat.primitives import serialization, hashes, padding
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 import os
+import copy 
 
 HOST = "127.0.0.1"
 PORT = 1234
 curve = ec.SECP256R1()
 shared_key  = None
+iv = os.urandom(16)
+salt = os.urandom(16)
 
 def send_thread(sockfd: socket.socket, public_key: ec.EllipticCurvePrivateKey):
     global shared_key
+    global iv
+    global salt
     sockfd.sendall(public_key.public_bytes(encoding=serialization.Encoding.PEM,format=serialization.PublicFormat.SubjectPublicKeyInfo))
-    print("$sent")
 
     while not shared_key:
         pass
 
     while True:
-        message = input().encode()
-        print("1")
-        iv = os.urandom(16)
-        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), iterations=100000, salt=os.urandom(16), length=32)
-        key = kdf.derive(shared_key)
-        encryptor = Cipher(algorithms.AES(key), modes.GCM(iv), backend = default_backend).encryptor()
+        message = input()
+        message = message.encode()
+        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), iterations=100000, salt=salt, backend=default_backend(), length=32)
+        aes_key = kdf.derive(shared_key)
+        encryptor = Cipher(algorithms.AES(aes_key), modes.CFB(iv), backend=default_backend()).encryptor()
         ciphertext = encryptor.update(message) + encryptor.finalize()
-        encrypted_data = ciphertext + encryptor.tag
-        sockfd.sendall(encrypted_data)
-        print(encrypted_data)
-        print("$sent m")
+        sockfd.sendall(ciphertext)
 
 def recv_thread(sockfd: socket.socket, private_key: ec.EllipticCurvePrivateKey):
     global shared_key
+    global iv
+    global salt
+    aes_key = None
 
     while True:
         recv_message = sockfd.recv(1024)
 
         try:
-            decoded_msg = recv_message.decode()
+            decoded_msg = copy.deepcopy(recv_message).decode()
 
             if "-----BEGIN PUBLIC KEY-----" in decoded_msg:
-                print("$received")
                 peer_public_key = serialization.load_pem_public_key(recv_message, default_backend())
                 shared_key = private_key.exchange(ec.ECDH(), peer_public_key)
-                print(shared_key.hex())
+                kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), iterations=100000, salt=salt, backend=default_backend(), length=32)
+                aes_key = kdf.derive(shared_key)
                 continue
         except:
             pass
@@ -55,17 +58,11 @@ def recv_thread(sockfd: socket.socket, private_key: ec.EllipticCurvePrivateKey):
             print("Server Disconnected")
             break
         
-        print("$received m")
-        received_ciphertext = recv_message[:-16]  # 16 byte tag
-        received_tag = recv_message[-16:]
         print(recv_message)
-        print(received_ciphertext)
-        print(received_tag)
-        decryptor = Cipher(algorithms.AES(shared_key), modes.GCM(received_tag), backend=default_backend()).decryptor()
-        decryptor.authenticate_additional_data(received_ciphertext)  # Provide the ciphertext for authentication
-        decrypted_plaintext = decryptor.update(received_ciphertext) + decryptor.finalize()
+        decryptor = Cipher(algorithms.AES(aes_key), modes.CFB(iv), backend=default_backend()).decryptor()
+        decrypted_text = decryptor.update(recv_message) + decryptor.finalize()
 
-        print(decrypted_plaintext.decode())
+        print(decrypted_text)
 
 
 def main():
