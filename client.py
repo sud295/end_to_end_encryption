@@ -7,37 +7,37 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 import os
 
-HOST = "127.0.0.1"  
-PORT = 1234 
+HOST = "127.0.0.1"
+PORT = 1234
 curve = ec.SECP256R1()
-encryptor = None 
+shared_key  = None
 
 def send_thread(sockfd: socket.socket, public_key: ec.EllipticCurvePrivateKey):
-    tag = None
-    global encryptor
+    global shared_key
     sockfd.sendall(public_key.public_bytes(encoding=serialization.Encoding.PEM,format=serialization.PublicFormat.SubjectPublicKeyInfo))
     print("$sent")
 
-    while not encryptor:
+    while not shared_key:
         pass
 
     while True:
         message = input().encode()
         print("1")
+        iv = os.urandom(16)
+        print(iv)
+        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), iterations=100000, salt=os.urandom(16), length=32)
+        key = kdf.derive(shared_key)
+        encryptor = Cipher(algorithms.AES(key), modes.GCM(iv)).encryptor()
         ciphertext = encryptor.update(message) + encryptor.finalize()
         encrypted_data = ciphertext + encryptor.tag
+        print(ciphertext)
+        print(encryptor.tag)
         sockfd.sendall(encrypted_data)
+        print(encrypted_data)
         print("$sent m")
 
 def recv_thread(sockfd: socket.socket, private_key: ec.EllipticCurvePrivateKey):
-    global encryptor
-
-    peer_public_key = None
-    kdf = None
-    decryptor = None
-    cipher = None
-    shared_key = None 
-    iv = '000000000000' #os.urandom(16)  # 128 bits
+    global shared_key
 
     while True:
         recv_message = sockfd.recv(1024)
@@ -48,13 +48,8 @@ def recv_thread(sockfd: socket.socket, private_key: ec.EllipticCurvePrivateKey):
             if "-----BEGIN PUBLIC KEY-----" in decoded_msg:
                 print("$received")
                 peer_public_key = serialization.load_pem_public_key(recv_message, default_backend())
-                shared_key_primitive = private_key.exchange(ec.ECDH(), peer_public_key)
-                print(shared_key_primitive.hex())
-                # Key Derivation Function (KDF)
-                kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), iterations=100000, salt=os.urandom(16), length=32)
-                shared_key = kdf.derive(shared_key_primitive)
-                cipher = Cipher(algorithms.AES(shared_key), modes.GCM(iv), backend = default_backend)
-                encryptor = cipher.encryptor()
+                shared_key = private_key.exchange(ec.ECDH(), peer_public_key)
+                print(shared_key.hex())
                 continue
         except:
             pass
@@ -67,8 +62,7 @@ def recv_thread(sockfd: socket.socket, private_key: ec.EllipticCurvePrivateKey):
         received_ciphertext = recv_message[:-16]  # 16 byte tag
         received_tag = recv_message[-16:]
         print(received_tag)
-        cipher = Cipher(algorithms.AES(shared_key), modes.GCM(iv,received_tag))
-        decryptor = cipher.decryptor()
+        decryptor = Cipher(algorithms.AES(shared_key), modes.GCM(received_tag,received_tag), backend=default_backend()).decryptor()
         decrypted_plaintext = decryptor.update(received_ciphertext) + decryptor.finalize()
 
         print(decrypted_plaintext.decode())
