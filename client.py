@@ -1,24 +1,36 @@
 import socket
 import threading
 from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.asymmetric.padding import PSS, MGF1
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-import copy
 
 HOST = "127.0.0.1"
 PORT = 1234
 curve = ec.SECP256R1()
 shared_key  = None
-iv = b'\xf0<\x92)A7\xaf\\\xa6k\xd6\xfc\x99\x88\x03>'
+iv = b'\xf0<\x92)A7\xaf\\\xa6k\xd6\xfc\x99\x88\x03>' #initialization vector
 salt = b'<h\x1az\x94\x89\xec\x907\xe8\xc1\x8e\x03u\xe3\xa1'
+rsa_private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048, backend=default_backend())
+rsa_public_key = rsa_private_key.public_key()
 
 def send_thread(sockfd: socket.socket, public_key: ec.EllipticCurvePrivateKey):
     global shared_key
     global iv
     global salt
-    sockfd.sendall(public_key.public_bytes(encoding=serialization.Encoding.PEM,format=serialization.PublicFormat.SubjectPublicKeyInfo))
+    global rsa_private_key
+    global rsa_public_key
+
+    # First send RSA public key
+    sockfd.sendall(rsa_public_key.public_bytes(encoding=serialization.Encoding.PEM,format=serialization.PublicFormat.SubjectPublicKeyInfo))
+
+    # Then send signed ECDH public key
+    signature = rsa_private_key.sign(public_key.public_bytes(encoding=serialization.Encoding.PEM,format=serialization.PublicFormat.SubjectPublicKeyInfo), PSS(mgf=MGF1(hashes.SHA256()), salt_length=PSS.MAX_LENGTH), hashes.SHA256())
+    clubbed = public_key.public_bytes(encoding=serialization.Encoding.PEM,format=serialization.PublicFormat.SubjectPublicKeyInfo) + signature
+
+    sockfd.sendall(clubbed)
 
     while not shared_key:
         pass
@@ -37,21 +49,31 @@ def recv_thread(sockfd: socket.socket, private_key: ec.EllipticCurvePrivateKey):
     global iv
     global salt
     aes_key = None
+    rsa_phase = True
+    peer_rsa_public_key = None
 
     while True:
         recv_message = sockfd.recv(1024)
 
-        try:
-            decoded_msg = copy.deepcopy(recv_message).decode()
+        if rsa_phase and (recv_message[:26]==b'-----BEGIN PUBLIC KEY-----'):
+            peer_rsa_public_key = serialization.load_pem_public_key(recv_message, default_backend())
+            rsa_phase = False
+            continue
 
-            if "-----BEGIN PUBLIC KEY-----" in decoded_msg:
-                peer_public_key = serialization.load_pem_public_key(recv_message, default_backend())
-                shared_key = private_key.exchange(ec.ECDH(), peer_public_key)
-                kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), iterations=100000, salt=salt, backend=default_backend(), length=32)
-                aes_key = kdf.derive(shared_key)
+        elif (not rsa_phase) and (recv_message[:26]==b'-----BEGIN PUBLIC KEY-----'):
+            key = recv_message[:-256]
+            sig = recv_message[-256:]
+            try:
+                peer_rsa_public_key.verify(sig, key, PSS(mgf=MGF1(hashes.SHA256()), salt_length=PSS.MAX_LENGTH), hashes.SHA256())
+            except:
+                print("Unable to verify peer identity; aborting connection.")
                 continue
-        except:
-            pass
+
+            peer_public_key = serialization.load_pem_public_key(key, default_backend())
+            shared_key = private_key.exchange(ec.ECDH(), peer_public_key)
+            kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), iterations=100000, salt=salt, backend=default_backend(), length=32)
+            aes_key = kdf.derive(shared_key)
+            continue
 
         if not recv_message:
             print("Server Disconnected")
