@@ -6,6 +6,7 @@ from cryptography.hazmat.primitives.asymmetric.padding import PSS, MGF1
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+import json
 
 HOST = "127.0.0.1"
 PORT = 1234
@@ -23,14 +24,19 @@ def send_thread(sockfd: socket.socket, public_key: ec.EllipticCurvePrivateKey):
     global rsa_private_key
     global rsa_public_key
 
-    # First send RSA public key
-    sockfd.sendall(rsa_public_key.public_bytes(encoding=serialization.Encoding.PEM,format=serialization.PublicFormat.SubjectPublicKeyInfo))
+    # Send the encryption details
 
-    # Then send signed ECDH public key
     signature = rsa_private_key.sign(public_key.public_bytes(encoding=serialization.Encoding.PEM,format=serialization.PublicFormat.SubjectPublicKeyInfo), PSS(mgf=MGF1(hashes.SHA256()), salt_length=PSS.MAX_LENGTH), hashes.SHA256())
-    clubbed = public_key.public_bytes(encoding=serialization.Encoding.PEM,format=serialization.PublicFormat.SubjectPublicKeyInfo) + signature
+    data_dict = {
+        "rsa_public_key": rsa_public_key.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo).decode(),
+        "ecdh_public_key": public_key.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo).decode(),
+        "initiator": "true",
+        "identity": f"{HOST}:{PORT}"
+    }
 
-    sockfd.sendall(clubbed)
+    json_bytes = json.dumps(data_dict).encode() + signature
+
+    sockfd.sendall(json_bytes)
 
     while not shared_key:
         pass
@@ -55,14 +61,14 @@ def recv_thread(sockfd: socket.socket, private_key: ec.EllipticCurvePrivateKey):
     while True:
         recv_message = sockfd.recv(1024)
 
-        if rsa_phase and (recv_message[:26]==b'-----BEGIN PUBLIC KEY-----'):
-            peer_rsa_public_key = serialization.load_pem_public_key(recv_message, default_backend())
-            rsa_phase = False
-            continue
-
-        elif (not rsa_phase) and (recv_message[:26]==b'-----BEGIN PUBLIC KEY-----'):
-            key = recv_message[:-256]
+        if rsa_phase:
+            to_decode = recv_message[:-256]
             sig = recv_message[-256:]
+
+            decoded_dict = json.loads(to_decode.decode('utf-8'))
+            peer_rsa_public_key = serialization.load_pem_public_key(decoded_dict["rsa_public_key"].encode(), default_backend())
+            key = decoded_dict["ecdh_public_key"].encode()
+
             try:
                 peer_rsa_public_key.verify(sig, key, PSS(mgf=MGF1(hashes.SHA256()), salt_length=PSS.MAX_LENGTH), hashes.SHA256())
             except:
@@ -73,6 +79,7 @@ def recv_thread(sockfd: socket.socket, private_key: ec.EllipticCurvePrivateKey):
             shared_key = private_key.exchange(ec.ECDH(), peer_public_key)
             kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), iterations=100000, salt=salt, backend=default_backend(), length=32)
             aes_key = kdf.derive(shared_key)
+            rsa_phase = False
             continue
 
         if not recv_message:
